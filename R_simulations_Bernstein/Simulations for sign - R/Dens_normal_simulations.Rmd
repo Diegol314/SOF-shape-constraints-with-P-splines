@@ -1,0 +1,1355 @@
+---
+title: "Simulación California"
+author: "Diego Serrano Ortega"
+date: "2023-04-18"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(refund)
+```
+
+
+
+```{r, tidy = FALSE,message=FALSE,warning=FALSE, fig.width=5, fig.height=5, echo=FALSE}
+###########Generating data##############################
+  set.seed(1)
+  N <- 125
+  m <- 50
+  T<- seq(0, 1, length = m)
+  eps<-rnorm(N,0,0.01)
+  #beta se genera a partir de la densidad de Pareto
+  
+  
+  betaT<-dnorm(T, mean=1/2, sd = 0.1)
+  plot(T,betaT,type="l")
+  # He simplificado las X
+  rankX <- 20
+  Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+  lambda <- rankX:1
+  Xi <- sapply(lambda, function(l)
+    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+  
+  X <- Xi %*% t(Phi) 
+  
+  #Gráfico de las X
+  
+  matplot(T,t(X),type="l",lty=1)
+
+  lfterm<-as.numeric((1/m)*X%*%betaT)
+  alpha<-0.15
+  y<-alpha+lfterm+eps
+  n<-length(y)
+  m<-length(T)
+```
+
+
+Perform cross-validation for choosing N1, degree of Bernstein polynomial.
+
+```{r, tidy = FALSE,message=FALSE,warning=FALSE, fig.width=5, fig.height=5,echo=FALSE}
+#@N1: Degree of Bernstein polynomial basis.
+#@y: Scalar response.
+#@X: Functional covariate on a grid, n * m matrix.
+#T: Equispaced time-grid of functional observations.
+#constr: Constraints, one of positive,negative,inc (increasing), dec (decreasing), convex, concave.
+SOFR.con<-function(N1,y,X,T,n2=m,constr="positive"){
+  m<-length(T)
+  tpred<-seq(0,1,l=n2)
+  X1 <- NULL
+  for(k in 0:N1){
+    X1 <- cbind(X1, dbeta(T, shape1=(k+1), shape2=N1-k+1))
+  }
+  
+  W<-matrix(0,N,(N1+1))
+  for(i in 1:N)
+  {for (k in 1:ncol(X1))
+  {
+    W[i,k]<-mean(X[i,]*X1[,k])
+  }
+  }
+  
+  library(restriktor)
+  glmod<-lm(y~W)
+  summary(glmod)
+  if(constr=="positive"){
+    A1<-diag(ncol(X1))
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  
+  if(constr=="negative"){
+    A1<--diag(ncol(X1))
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  
+  if(constr=="dec"){
+    A1<-matrix(0,nrow=N1,ncol=(N1+1),byrow = TRUE)
+    for(i in 1:(N1))
+    {A1[i,i]=1
+    A1[i,(i+1)]=-1}
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  if(constr=="inc"){
+    A1<-matrix(0,nrow=N1,ncol=(N1+1),byrow = TRUE)
+    for(i in 1:(N1))
+    {A1[i,i]=-1
+    A1[i,(i+1)]=1}
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  
+  if(constr=="convex"){
+    A1<-matrix(0,nrow=(N1-1),ncol=(N1+1),byrow = TRUE)
+    for(i in 1:(N1-1))
+    {A1[i,i]=1
+    A1[i,i+1]=-2
+    A1[i,i+2]=1
+    }
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  
+  if(constr=="concave"){
+    A1<-matrix(0,nrow=(N1-1),ncol=(N1+1),byrow = TRUE)
+    for(i in 1:(N1-1))
+    {A1[i,i]=-1
+    A1[i,i+1]=2
+    A1[i,i+2]=-1
+    }
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+  }
+  
+  fit.con <- restriktor(glmod, constraints = A,rhs=b,neq=0)
+  betares<- coef(fit.con) 
+  ypred<-fit.con$fitted
+  
+  beta1est<-function(x){
+    
+    n<-length(x)
+    X1 <- NULL
+    for(k in 0:N1){
+      X1 <- cbind(X1, dbeta(x, shape1=(k+1), shape2=N1-k+1))
+    }
+    pred<-as.numeric(X1%*%betares[-1])
+    pred
+  }
+  coef <- beta1est(tpred)
+  betaresun<-coef(glmod)
+  Wreal<-cbind(rep(1,N),W)
+  Omegahat<-(t(Wreal)%*%Wreal)*(1/N)
+  ###sigmahat beta ur###
+  sigmahat_ur<-as.matrix(vcov(glmod))
+  L_omega<-t(chol(Omegahat))
+  library(MASS)
+  zgen<-function(...)
+  {betacan_ur<-mvrnorm(n=1,mu=betaresun,Sigma=sigmahat_ur)
+  Ystar<-as.numeric(L_omega%*%(betacan_ur))
+  Xstar<-L_omega
+  library(quadprog)
+  #ATb> b0.
+  Dmat = t(Xstar) %*% Xstar
+  Amat = t(A) 
+  bvec = b
+  dvec = t(Xstar) %*% Ystar
+  out<-solve.QP(Dmat = Dmat, dvec = dvec, Amat = Amat, bvec = bvec, meq = 0, factorized = F)
+  betaproj<-out$solution #out$solution
+  betaproj  
+  }
+  betagenmat<-sapply(1:10000,zgen)##10000 simulations from d
+  betagenmat<-t(betagenmat)
+  
+  bootmatest<-matrix(0,10000,m)
+  for(b in 1:10000){
+    betatemp<-betagenmat[b,]
+    beta1estboot<-function(x){
+      
+      n<-length(x)
+      X1 <- NULL
+      for(k in 0:N1){
+        X1 <- cbind(X1, dbeta(x, shape1=(k+1), shape2=N1-k+1))
+      }
+      pred<-as.numeric(X1%*%betatemp[-1])
+      pred
+    }
+    bootmatest[b,]<-beta1estboot(T)
+  }
+  lb<-apply(bootmatest,2, quantile,probs=0.025)
+  ub<-apply(bootmatest,2, quantile,probs=0.975)
+  result<-list(betaSOFR=coef,yhat=ypred,lb=lb,ub=ub)
+  return(result)
+  }
+ 
+```
+
+
+```{r, tidy = FALSE,message=FALSE,warning=FALSE, fig.width=5, fig.height=5, echo = FALSE}
+#@N1: Degree of Bernstein polynomial basis.
+#@y: Scalar response.
+#@X: Functional covariate on a grid, n * m matrix.
+#T: Equispaced time-grid of functional observations.
+#constr: Constraints, one of positive,negative,inc (increasing), dec (decreasing), convex, concave.
+############CV function FOR CHOOSING N, degree of BP##################
+  cv.SOFR.con<-function(N1,y,X,T,constr="positive")
+  { n<-length(y)
+    library(caret)
+    set.seed(1)
+    find<-createFolds(y=c(1:n), k = 5, list = FALSE, returnTrain = FALSE)
+    cvscore<-c()
+    for (v in 1:5)
+    {tempind=which(find==v)
+    X1 <- NULL
+    for(k in 0:N1){
+      X1 <- cbind(X1, dbeta(T, shape1=(k+1), shape2=N1-k+1))
+    }
+    nte<-length(tempind)
+    ntr<-n-nte
+    W<-matrix(0,N,(N1+1))
+    for(i in 1:n)
+    {for (k in 1:ncol(X1))
+    {
+      W[i,k]<-mean(X[i,]*X1[,k])
+    }
+    }
+    
+    Wtr<-W[-tempind,]
+    Wte<-W[tempind,]
+    ytr<-y[-tempind]
+    yte<-y[tempind]
+    
+    library(restriktor)
+    glmod<-lm(ytr~Wtr)
+    summary(glmod)
+    
+    if(constr=="positive"){
+    A1<-diag(ncol(X1))
+    A<-cbind(rep(0,nrow(A1)),A1)
+    b=rep(0,nrow(A))
+    }
+    
+    if(constr=="negative"){
+      A1<--diag(ncol(X1))
+      A<-cbind(rep(0,nrow(A1)),A1)
+      b=rep(0,nrow(A))
+    }
+    
+    if(constr=="dec"){
+      A1<-matrix(0,nrow=N1,ncol=(N1+1),byrow = TRUE)
+      for(i in 1:(N1))
+      {A1[i,i]=1
+      A1[i,(i+1)]=-1}
+      A<-cbind(rep(0,nrow(A1)),A1)
+      b=rep(0,nrow(A))
+    }
+    if(constr=="inc"){
+      A1<-matrix(0,nrow=N1,ncol=(N1+1),byrow = TRUE)
+      for(i in 1:(N1))
+      {A1[i,i]=-1
+      A1[i,(i+1)]=1}
+      A<-cbind(rep(0,nrow(A1)),A1)
+      b=rep(0,nrow(A))
+    }
+    
+    if(constr=="convex"){
+      A1<-matrix(0,nrow=(N1-1),ncol=(N1+1),byrow = TRUE)
+      for(i in 1:(N1-1))
+      {A1[i,i]=1
+      A1[i,i+1]=-2
+      A1[i,i+2]=1
+      }
+      A<-cbind(rep(0,nrow(A1)),A1)
+      b=rep(0,nrow(A))
+    }
+    
+    if(constr=="concave"){
+      A1<-matrix(0,nrow=(N1-1),ncol=(N1+1),byrow = TRUE)
+      for(i in 1:(N1-1))
+      {A1[i,i]=-1
+      A1[i,i+1]=2
+      A1[i,i+2]=-1
+      }
+      A<-cbind(rep(0,nrow(A1)),A1)
+      b=rep(0,nrow(A))
+    }
+    
+    fit.con <- restriktor(glmod, constraints = A,rhs=b,neq=0)
+    betares<- coef(fit.con) 
+    Xtemat<-cbind(rep(1,nte),Wte)
+    ypred<-as.numeric(Xtemat%*%betares)
+    cvscore[v]<- mean((yte-ypred)^2)
+    }
+    cverror<-mean(cvscore)
+    return(cverror)
+  }
+  cv.SOFR.con<-Vectorize(cv.SOFR.con,vectorize.args = "N1")
+  
+```
+
+
+Function for *UNCONSTRAINED* estimation. It is a modified version of SOFR.con in which I removed the constraints. This way the unconstrained beta coefficient is fitted using the same R functions than its constrained counterpart. I did not run cross validation to find the degree of the Bernstein polynomial, I just picked 4 as they say in the paper to speed up the process.  
+
+```{r, tidy = FALSE,message=FALSE,warning=FALSE, fig.width=5, fig.height=5, echo=FALSE}
+#@N1: Degree of Bernstein polynomial basis.
+#@y: Scalar response.
+#@X: Functional covariate on a grid, n * m matrix.
+#T: Equispaced time-grid of functional observations.
+#constr: Constraints, one of positive,negative,inc (increasing), dec (decreasing), convex, concave.
+SOFR.NULL<-function(N1,y,X,T,n2=m,constr=NULL){
+  m<-length(T)
+  tpred<-seq(0,1,l=n2)
+  X1 <- NULL
+  for(k in 0:N1){
+    X1 <- cbind(X1, dbeta(T, shape1=(k+1), shape2=N1-k+1))
+  }
+  
+  W<-matrix(0,N,(N1+1))
+  for(i in 1:N)
+  {for (k in 1:ncol(X1))
+  {
+    W[i,k]<-mean(X[i,]*X1[,k])
+  }
+  }
+  
+  library(restriktor)
+  glmod<-lm(y~W)
+  summary(glmod)
+  
+  fit.con <- restriktor(glmod, constraints = NULL, rhs=NULL,neq=0)
+  betares<- coef(fit.con) 
+  ypred<-fit.con$fitted
+  
+  beta1est<-function(x){
+    
+    n<-length(x)
+    X1 <- NULL
+    for(k in 0:N1){
+      X1 <- cbind(X1, dbeta(x, shape1=(k+1), shape2=N1-k+1))
+    }
+    pred<-as.numeric(X1%*%betares[-1])
+    pred
+  }
+  coef <- beta1est(tpred)
+  betaresun<-coef(glmod)
+  Wreal<-cbind(rep(1,N),W)
+  Omegahat<-(t(Wreal)%*%Wreal)*(1/N)
+  
+  result<-list(betaSOFR=coef, yhat=ypred)
+  return(result)
+  }
+ 
+```
+
+
+
+
+
+
+
+```{r, echo=FALSE}
+#Limits
+n=length(betaT)-1
+a = 0
+b = 1
+#Step of the grid. Recall that n is the number of subintervals.
+h = (b-a)/n
+
+#Nodes
+#nodes = seq(a, b, h)
+
+#note for myself: n is the number of subintervals, n+1 number of nodes
+
+#weights. 1/3 for the limits, 2/3 for the odd subintervals, 4/3 for the even ones. 
+w = rep(1, n+1)
+w[seq(2, n, 2)] = 4/3
+w[seq(3, n, 2)] = 2/3
+w[1] = w[n+1] = 1/3
+
+W=diag(w)
+```
+
+
+
+
+# ERROR FOLLOWS N(0, 0.01)
+
+
+```{r, cache=TRUE}
+#set.seed(1)
+#m = 50
+#N = 125
+#n_sims = 20
+#
+#set.seed(1)
+## Initialize matrix to store fitted values
+#fitted_vals_matrix <- matrix(0, n_sims, m)
+#
+#tiempo_unconstrained = 0
+#IMSE_uncons= 0
+#Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+#start_time= Sys.time()
+#for (i in 1:n_sims) {
+#  ###########Generating data##############################
+#  
+#  eps<-rnorm(N,0,0.01)
+#  #beta se genera a partir de la densidad de una normal estándar
+#  
+#
+#  # He simplificado las X
+#  rankX <- 20
+#
+#  lambda <- rankX:1
+#  Xi <- sapply(lambda, function(l)
+#    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+#  
+#  X <- Xi %*% t(Phi) 
+#  
+#
+#  lfterm<-as.numeric((1/m)*X%*%betaT)
+#  alpha<-0.15
+#  y<-alpha+lfterm+eps
+#  n<-length(y)
+#  m<-length(T)
+#  
+#  
+#  fit <- pfr(y ~ lf(X, argvals=T, k=20, bs="ps", m=2))
+#  aa <- coef(fit, n=m)
+#  val <- aa$value
+#  plot(T, val, ylim=c(-0.05, 1))
+#  lines(T, betaT)
+#  
+#  # Store fitted values in matrix
+##   fitted_vals_matrix[i,] <- val
+##   
+#IMSE_uncons = IMSE_uncons + h*sum(t(betaT-val)^2%*%W)
+## end_time= Sys.time()
+## tiempo_unconstrained = end_time - start_time
+#}
+## Calculate mean and confidence intervals for each mesh point
+##mean_fitted_vals <- apply(fitted_vals_matrix, 2, mean)
+##lower_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.025))
+##upper_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.975))
+##
+### Combine results into a data frame
+##results_unconstrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+##IMSE_uncons = IMSE_uncons
+#
+#paste0('IMSE:', IMSE_uncons/n_sims*1000)
+## paste0('Times:', tiempo_unconstrained)
+```
+
+
+# SIMULATIONS TO CALCULATE IMSE AND MSE
+
+```{r, cache=TRUE}
+# set.seed(1)
+# m = 50
+# 
+# n_sims = 200
+# 
+# set.seed(1)
+# # Initialize matrix to store fitted values
+# fitted_vals_matrix <- matrix(0, n_sims, m)
+# 
+# tiempo_unconstrained = 0
+# IMSE_uncons= rep(0,n_sims)
+# MSE_uncons= rep(0,n_sims)
+# Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+# start_time= Sys.time()
+# for (N in c(50,100,200)){
+# for (i in 1:n_sims) {
+#   ###########Generating data##############################
+#   
+#   eps<-rnorm(N,0,0.01)
+#   #beta se genera a partir de la densidad de una normal estándar
+#   
+# 
+#   # He simplificado las X
+#   rankX <- 10
+# 
+#   lambda <- rankX:1
+#   Xi <- sapply(lambda, function(l)
+#     scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+#   
+#   X <- Xi %*% t(Phi) 
+#   
+# 
+#   lfterm<-as.numeric((1/m)*X%*%betaT)
+#   alpha<-0.15
+#   y<-alpha+lfterm+eps
+#   n<-length(y)
+#   m<-length(T)
+#   
+#   
+#   fit <- pfr(y ~ lf(X, argvals=T, k=30, bs="ps", m=2))
+#   aa <- coef(fit, n=m)
+#   yhat=fit$fitted.values
+#   val <- aa$value
+#   fitted_vals_matrix[i,] <- val
+# 
+#   
+# # Calculate mean and confidence intervals for each mesh point
+# mean_fitted_vals <- apply(fitted_vals_matrix, 2, mean)
+# 
+# IMSE_uncons[i] = h*sum(t(betaT-val)^2%*%W)
+# MSE_uncons[i] = mean((y-yhat)**2)
+# end_time= Sys.time()
+# 
+# }
+#tiempo_unconstrained = end_time - start_time
+## Calculate mean and confidence intervals for each mesh point
+#mean_fitted_vals <- apply(fitted_vals_matrix, 2, mean)
+#lower_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.025))
+#upper_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.975))
+##
+### Combine results into a data frame
+#results_unconstrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+#
+#
+#print(paste0('IMSE for N=',N, ':', mean(IMSE_uncons)*1000))
+#print(paste0('MSE for N=',N, ':', mean(MSE_uncons)*1000))
+#print(paste0('Standard deviation of the IMSE for N=',N, ':', sd(IMSE_uncons)))
+#print(paste0('Standard deviation of the MSE for N=',N, ':', sd(MSE_uncons)))
+#print(paste0('Times:', tiempo_unconstrained))
+#}
+```
+
+
+
+
+```{r, cache=TRUE}
+set.seed(1)
+m = 50
+n_sims = 200
+T<- seq(0, 1, length = m)
+T2<- seq(0, 1, length = 501)
+betaT2<-dnorm(T2,mean=1/2, sd=0.1)
+#Limits
+
+# Initialize matrix to store fitted values
+fitted_means_matrix <- matrix(0, n_sims, m)
+fitted_lower_matrix <- matrix(0, n_sims, m)
+fitted_upper_matrix <- matrix(0, n_sims, m)
+
+
+
+IMSE_uncons=rep(0, n_sims)
+MSE_uncons=rep(0, n_sims)
+
+
+tiempo_unconstrained=0
+
+rankX <- 20
+
+
+
+
+Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+lambda <- rankX:1
+cont=0
+
+
+
+start_time= Sys.time()
+for (N in c(125)){
+for (i in 1:n_sims) {
+  ###########Generating data##############################
+  print(i)
+  eps<-rnorm(N,0,0.01)
+
+
+
+  Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+  lambda <- rankX:1
+  Xi <- sapply(lambda, function(l)
+  scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+
+  X <- Xi %*% t(Phi)
+  
+
+  
+  # betaT<-beta(T)
+  lfterm<-as.numeric((1/m)*X%*%betaT)
+  alpha<-0.15
+  y<-alpha+lfterm+eps
+  n<-length(y)
+  m<-length(T)
+  
+
+  
+  Ngrid<-c(3:8)  ###grid for choosing N1
+  cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+  indmin<-which.min(cv)
+  ###############################################
+  N1 <- Ngrid[indmin] #selected N1
+
+  
+
+  out.NULL<-SOFR.NULL(N1,y,X,T,m,constr = NULL)
+  beta1t = out.NULL$betaSOFR
+
+  yhat=out.NULL$yhat
+  
+  # Store fitted values in matrix
+  fitted_means_matrix[i,] <- beta1t
+  
+  #IMSE
+  IMSE_uncons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+  # MSE
+  MSE_uncons[i] = mean((y-yhat)**2)
+
+
+
+
+IMSE_uncons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+MSE_uncons[i] = mean((y-yhat)**2)
+end_time= Sys.time()
+
+}
+tiempo_unconstrained = end_time - start_time
+# Calculate mean and confidence intervals for each mesh point
+mean_fitted_vals <- apply(fitted_means_matrix, 2, mean)
+lower_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.025))
+upper_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.975))
+#
+## Combine results into a data frame
+results_unconstrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+
+
+print(paste0('IMSE for N=',N, ':', mean(IMSE_uncons)*1000))
+print(paste0('MSE for N=',N, ':', mean(MSE_uncons)*1000))
+print(paste0('Standard deviation of the IMSE for N=',N, ':', sd(IMSE_uncons)))
+print(paste0('Standard deviation of the MSE for N=',N, ':', sd(MSE_uncons)))
+print(paste0('Times:', tiempo_unconstrained))
+}
+```
+
+
+
+# CONSTRAINED
+
+### PLOTS
+
+
+
+
+```{r, cache=TRUE}
+# set.seed(1)
+# m = 50
+# n_sims = 1
+# # Initialize matrix to store fitted values
+# fitted_means_matrix <- matrix(0, n_sims, m)
+# fitted_lower_matrix <- matrix(0, n_sims, m)
+# fitted_upper_matrix <- matrix(0, n_sims, m)
+# T<- seq(-5, 5, length = m)
+# eps<-rnorm(N,0,0.01)
+# #beta se genera a partir de la densidad de una normal estándar
+# betaT=dnorm(T)
+# 
+# IMSE_cons=rep(0, n_sims)
+# MSE_cons=rep(0, n_sims)
+# 
+# tiempo_constrained=0
+# alpha <- 0.15
+# rankX <- 10
+# Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+# lambda <- rankX:1
+# 
+# for (i in 1:n_sims) {
+#   
+#   ###########Generating data##############################
+#   
+#   eps<-rnorm(N,0,0.01)
+#   #beta se genera a partir de la densidad de una normal estándar
+# 
+# 
+#   # He simplificado las X
+# 
+#   Xi <- sapply(lambda, function(l)
+#     scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+#   
+#   X <- Xi %*% t(Phi) 
+# 
+#   lfterm<-as.numeric((1/m)*X%*%betaT)
+#   y<-alpha+lfterm+eps
+#   n<-length(y)
+#   m<-length(T)
+#  
+#   
+#   N1=3
+#   #######################CHOOSE N1#######################
+#   
+#   #cv.SOFR.con<-Vectorize(cv.SOFR.con,vectorize.args = "N1")
+#   #Ngrid<-c(3:8)  ###grid for choosing N1
+#   #cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+#   #indmin<-which.min(cv)  
+# #
+#   #N1=Ngrid[indmin] #selected N1
+#   
+#   ############################################
+#   
+#   out<-SOFR.con(N1,y,X,T,m,constr = "positive")
+#   beta1t<-out$betaSOFR #constrained estimate
+#   lb<-out$lb ##projection based confidence intervals
+#   ub<-out$ub 
+#   plot(T,betaT)
+#   lines(T,beta1t)
+# }
+```
+
+
+
+
+
+### Cálculo del IMSE y el MSE
+
+```{r, cache=TRUE}
+set.seed(1)
+m = 50
+n_sims = 200
+# Initialize matrix to store fitted values
+fitted_means_matrix <- matrix(0, n_sims, m)
+fitted_lower_matrix <- matrix(0, n_sims, m)
+fitted_upper_matrix <- matrix(0, n_sims, m)
+eps<-rnorm(N,0,0.01)
+#beta se genera a partir de la densidad de una normal estándar
+
+
+IMSE_cons=rep(0, n_sims)
+MSE_cons=rep(0, n_sims)
+
+tiempo_constrained=0
+alpha <- 0.15
+rankX <- 20
+Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+lambda <- rankX:1
+cont=0
+for (N in c(125)){
+start_time= Sys.time()
+for (i in 1:n_sims) {
+  
+  ###########Generating data##############################
+  
+  eps<-rnorm(N,0,0.01)
+  #beta se genera a partir de la densidad de una normal estándar
+
+
+  # He simplificado las X
+
+  Xi <- sapply(lambda, function(l)
+    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+  
+  X <- Xi %*% t(Phi) 
+
+  lfterm<-as.numeric((1/m)*X%*%betaT)
+  y<-alpha+lfterm+eps
+  n<-length(y)
+  m<-length(T)
+ 
+  
+  Ngrid<-c(3:8)  ###grid for choosing N1
+  cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+  indmin<-which.min(cv)
+  ###############################################
+  N1 <- Ngrid[indmin] #selected N1
+
+  
+  out<-SOFR.con(N1,y,X,T,m,constr = "positive")
+  #out.NULL<-SOFR.NULL(N1,y,X,T,m,constr = NULL)
+  beta1t<-out$betaSOFR #constrained estimate
+
+  yhat=out$yhat
+  
+  # Store fitted values in matrix
+  fitted_means_matrix[i,] <- beta1t
+  
+  #IMSE
+  IMSE_cons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+  # MSE
+  MSE_cons[i] = mean((y-yhat)**2)
+  
+}
+end_time= Sys.time()
+tiempo_constrained = end_time - start_time
+# Calculate mean and confidence intervals for each mesh point
+mean_fitted_vals <- apply(fitted_means_matrix, 2, mean)
+lower_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.025))
+upper_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.975))
+
+# Combine results into a data frame
+results_constrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+
+print(paste0('IMSE for N=',N, mean(IMSE_cons)*1000))
+print(paste0('MSE for N=',N, mean(MSE_cons)*1000))
+print(paste0('Standard deviation of the IMSE for N=',N, sd(IMSE_cons)))
+print(paste0('Standard deviation of the MSE for N=',N, sd(MSE_cons)))
+print(paste0('Times:', tiempo_constrained))
+}
+```
+
+
+
+
+```{r, fig.width=2.75, fig.height=3.5}
+library(ggplot2)
+library(gridExtra)
+# Create a data fr,ame with the, values for ,T, betaT, and the results
+df <- data.frame(T = T,
+                 betaT = betaT,
+                 mean = results_unconstrained$mean,
+                 lower = results_unconstrained$lower,
+                 upper = results_unconstrained$upper)
+
+df2 <- data.frame(T = T,
+                 betaT = betaT,
+                 mean = results_constrained$mean,
+                 lower = results_constrained$lower,
+                 upper = results_constrained$upper)
+
+
+
+# Create the plot using ggplot
+ggplot(df, aes(x = T)) +
+  geom_line(aes(y = betaT), color = "#666E86", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = mean), color = "#5F3108", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = lower), color = "#B99B81",linetype= "dashed", size=1)+
+  geom_line(aes(y = upper),color = "#B99B81", linetype="dashed", size=1)+
+  geom_hline(yintercept = 0, color = "#780000") +
+  ylim(-0.1, 4.1) +
+  
+  theme_bw() +
+  theme(axis.line = element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = c(.95, .95),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6)
+    ) 
+
+# Create the plot using ggplot
+ggplot(df2, aes(x = T)) +
+  geom_line(aes(y = betaT), color = "#666E86", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = mean), color = "#5F3108", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = lower), color = "#B99B81",linetype= "dashed", size=1)+
+  geom_line(aes(y = upper),color = "#B99B81", linetype="dashed", size=1)+
+  geom_hline(yintercept = 0, color = "#780000") +
+  ylim(-0.1, 4.1) +
+  
+  theme_bw() +
+  theme(axis.line = element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = c(.95, .95),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6)
+    ) 
+
+```
+
+
+```{r, fig.width=5.5, fig.height=4.5}
+# par(mfrow=c(1,2))
+# 
+#   plot(T,betaT, col='black', ylim=c(-0.05,0.75), type='l') #true coefficient function
+#   lines(T,results_constrained$mean,col="black",lty=5) #unconstrained estimate
+#   lines(T,results_constrained$lower,col="black",lty=3) #projection based C.I
+#   lines(T,results_constrained$upper,col="black",lty=3)  #projection based C.I
+#   abline(h=0, col='red')
+#   
+#   plot(T,betaT, col='black', ylim=c(-0.05,0.75), type='l') #true coefficient function
+#   lines(T,results_unconstrained$mean,col="black",lty=5) #unconstrained estimate
+#   lines(T,results_unconstrained$lower,col="black",lty=3) #projection based C.I
+#   lines(T,results_unconstrained$upper,col="black",lty=3)  #projection based C.I
+#   abline(h=0, col='red')
+#   
+```
+
+
+
+
+```{r}
+print(IMSE_uncons)
+print(MSE_uncons)
+print(IMSE_cons)
+print(MSE_cons)
+```
+
+
+
+
+
+
+
+# ERROR FOLLOWS N(0, 0.05)
+
+
+
+
+
+
+
+```{r, cache=TRUE}
+#set.seed(1)
+#m = 50
+#N = 200
+#n_sims = 20
+#
+#set.seed(1)
+## Initialize matrix to store fitted values
+#fitted_vals_matrix <- matrix(0, n_sims, m)
+#
+#tiempo_unconstrained = 0
+#IMSE_uncons= 0
+#Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+#start_time= Sys.time()
+#for (i in 1:n_sims) {
+#  ###########Generating data##############################
+#  
+#  eps<-rnorm(N,0,0.05)
+#  #beta se genera a partir de la densidad de una normal estándar
+#  
+#
+#  # He simplificado las X
+#  rankX <- 10
+#
+#  lambda <- rankX:1
+#  Xi <- sapply(lambda, function(l)
+#    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+#  
+#  X <- Xi %*% t(Phi) 
+#  
+#
+#  lfterm<-as.numeric((1/m)*X%*%betaT)
+#  alpha<-0.15
+#  y<-alpha+lfterm+eps
+#  n<-length(y)
+#  m<-length(T)
+#  
+#  
+#  fit <- pfr(y ~ lf(X, argvals=T, k=20, bs="ps", m=2))
+#  aa <- coef(fit, n=m)
+#  val <- aa$value
+#  plot(T, val, ylim=c(-0.05, 1))
+#  lines(T, betaT)
+#  
+#  # Store fitted values in matrix
+##   fitted_vals_matrix[i,] <- val
+##   
+#IMSE_uncons = IMSE_uncons + h*sum(t(betaT-val)^2%*%W)
+## end_time= Sys.time()
+## tiempo_unconstrained = end_time - start_time
+#}
+## Calculate mean and confidence intervals for each mesh point
+##mean_fitted_vals <- apply(fitted_vals_matrix, 2, mean)
+##lower_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.025))
+##upper_ci <- apply(fitted_vals_matrix, 2, function(x) quantile(x, 0.975))
+##
+### Combine results into a data frame
+##results_unconstrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+##IMSE_uncons = IMSE_uncons
+#
+#paste0('IMSE:', IMSE_uncons/n_sims*1000)
+## paste0('Times:', tiempo_unconstrained)
+```
+#
+#
+# SIMULATIONS TO CALCULATE IMSE AND MSE
+
+```{r, cache=TRUE}
+set.seed(1)
+m = 50
+n_sims = 200
+T<- seq(0, 1, length = m)
+T2<- seq(0, 1, length = 501)
+betaT2<-dnorm(T2,mean=1/2, sd=0.1)
+#Limits
+
+# Initialize matrix to store fitted values
+fitted_means_matrix <- matrix(0, n_sims, m)
+fitted_lower_matrix <- matrix(0, n_sims, m)
+fitted_upper_matrix <- matrix(0, n_sims, m)
+
+
+
+IMSE_uncons=rep(0, n_sims)
+MSE_uncons=rep(0, n_sims)
+
+
+tiempo_unconstrained=0
+
+rankX <- 20
+
+
+
+
+Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+lambda <- rankX:1
+cont=0
+
+
+
+start_time= Sys.time()
+for (N in c(125)){
+for (i in 1:n_sims) {
+  ###########Generating data##############################
+  print(i)
+  eps<-rnorm(N,0,0.05)
+
+
+
+  Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+  lambda <- rankX:1
+  Xi <- sapply(lambda, function(l)
+  scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+
+  X <- Xi %*% t(Phi)
+  
+
+  
+  # betaT<-beta(T)
+  lfterm<-as.numeric((1/m)*X%*%betaT)
+  alpha<-0.15
+  y<-alpha+lfterm+eps
+  n<-length(y)
+  m<-length(T)
+  
+
+  
+  Ngrid<-c(3:8)  ###grid for choosing N1
+  cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+  indmin<-which.min(cv)
+  ###############################################
+  N1 <- Ngrid[indmin] #selected N1
+
+  
+
+  out.NULL<-SOFR.NULL(N1,y,X,T,m,constr = NULL)
+  beta1t = out.NULL$betaSOFR
+
+  yhat=out.NULL$yhat
+  
+  # Store fitted values in matrix
+  fitted_means_matrix[i,] <- beta1t
+  
+  #IMSE
+  IMSE_uncons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+  # MSE
+  MSE_uncons[i] = mean((y-yhat)**2)
+
+
+
+
+IMSE_uncons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+MSE_uncons[i] = mean((y-yhat)**2)
+end_time= Sys.time()
+
+}
+tiempo_unconstrained = end_time - start_time
+# Calculate mean and confidence intervals for each mesh point
+mean_fitted_vals <- apply(fitted_means_matrix, 2, mean)
+lower_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.025))
+upper_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.975))
+#
+## Combine results into a data frame
+results_unconstrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+
+
+print(paste0('IMSE for N=',N, ':', mean(IMSE_uncons)*1000))
+print(paste0('MSE for N=',N, ':', mean(MSE_uncons)*1000))
+print(paste0('Standard deviation of the IMSE for N=',N, ':', sd(IMSE_uncons)))
+print(paste0('Standard deviation of the MSE for N=',N, ':', sd(MSE_uncons)))
+print(paste0('Times:', tiempo_unconstrained))
+}
+```
+
+
+
+
+
+
+
+# CONSTRAINED
+
+### PLOTS
+
+
+
+
+```{r, cache=TRUE}
+#set.seed(1)
+#m = 50
+#n_sims = 1
+## Initialize matrix to store fitted values
+#fitted_means_matrix <- matrix(0, n_sims, m)
+#fitted_lower_matrix <- matrix(0, n_sims, m)
+#fitted_upper_matrix <- matrix(0, n_sims, m)
+#T<- seq(-5, 5, length = m)
+#eps<-rnorm(N,0,0.01)
+##beta se genera a partir de la densidad de una normal estándar
+#betaT=dnorm(T)
+#
+#IMSE_cons=rep(0, n_sims)
+#MSE_cons=rep(0, n_sims)
+#
+#tiempo_constrained=0
+#alpha <- 0.15
+#rankX <- 10
+#Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+#lambda <- rankX:1
+#
+#for (i in 1:n_sims) {
+#  
+#  ###########Generating data##############################
+#  
+#  eps<-rnorm(N,0,0.05)
+#  #beta se genera a partir de la densidad de una normal estándar
+#
+#
+#  # He simplificado las X
+#
+#  Xi <- sapply(lambda, function(l)
+#    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+#  
+#  X <- Xi %*% t(Phi) 
+#
+#  lfterm<-as.numeric((1/m)*X%*%betaT)
+#  y<-alpha+lfterm+eps
+#  n<-length(y)
+#  m<-length(T)
+# 
+#  
+#  N1=3
+#  #######################CHOOSE N1#######################
+#  
+#  #cv.SOFR.con<-Vectorize(cv.SOFR.con,vectorize.args = "N1")
+#  #Ngrid<-c(3:8)  ###grid for choosing N1
+#  #cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+#  #indmin<-which.min(cv)  
+##
+#  #N1=Ngrid[indmin] #selected N1
+#  
+#  ############################################
+#  
+#  out<-SOFR.con(N1,y,X,T,m,constr = "positive")
+#  beta1t<-out$betaSOFR #constrained estimate
+#  lb<-out$lb ##projection based confidence intervals
+#  ub<-out$ub 
+#  plot(T,betaT)
+#  lines(T,beta1t)
+#}
+```
+
+
+
+
+
+### Cálculo del IMSE y el MSE
+
+```{r, cache=TRUE}
+set.seed(1)
+m = 50
+n_sims = 200
+# Initialize matrix to store fitted values
+fitted_means_matrix <- matrix(0, n_sims, m)
+fitted_lower_matrix <- matrix(0, n_sims, m)
+fitted_upper_matrix <- matrix(0, n_sims, m)
+#beta se genera a partir de la densidad de una normal estándar
+
+
+IMSE_cons=rep(0, n_sims)
+MSE_cons=rep(0, n_sims)
+
+tiempo_constrained=0
+alpha <- 0.15
+rankX <- 20
+Phi <- cbind(1/sqrt(m), poly(T, degree=rankX-1))
+lambda <- rankX:1
+cont=0
+for (N in c(125)){
+start_time= Sys.time()
+for (i in 1:n_sims) {
+  
+  ###########Generating data##############################
+  
+  eps<-rnorm(N,0,0.05)
+  #beta se genera a partir de la densidad de una normal estándar
+
+
+  # He simplificado las X
+
+  Xi <- sapply(lambda, function(l)
+    scale(rnorm(N, sd=sqrt(l)), scale=FALSE))
+  
+  X <- Xi %*% t(Phi) 
+
+  lfterm<-as.numeric((1/m)*X%*%betaT)
+  y<-alpha+lfterm+eps
+  n<-length(y)
+  m<-length(T)
+ 
+  
+  Ngrid<-c(3:8)  ###grid for choosing N1
+  cv<-cv.SOFR.con(Ngrid,y,X,T,constr = "positive")
+  indmin<-which.min(cv)
+  ###############################################
+  N1 <- Ngrid[indmin] #selected N1
+
+  
+  out<-SOFR.con(N1,y,X,T,m,constr = "positive")
+  #out.NULL<-SOFR.NULL(N1,y,X,T,m,constr = NULL)
+  beta1t<-out$betaSOFR #constrained estimate
+
+  yhat=out$yhat
+  
+  # Store fitted values in matrix
+  fitted_means_matrix[i,] <- beta1t
+  
+  #IMSE
+  IMSE_cons[i] = h*sum(t(betaT-beta1t)^2%*%W)
+  # MSE
+  MSE_cons[i] = mean((y-yhat)**2)
+  
+}
+end_time= Sys.time()
+tiempo_constrained = end_time - start_time
+# Calculate mean and confidence intervals for each mesh point
+mean_fitted_vals <- apply(fitted_means_matrix, 2, mean)
+lower_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.025))
+upper_ci <- apply(fitted_means_matrix, 2, function(x) quantile(x, 0.975))
+
+# Combine results into a data frame
+results_constrained <- data.frame(T=T, mean=mean_fitted_vals, lower=lower_ci, upper=upper_ci)
+
+print(paste0('IMSE for N=',N, mean(IMSE_cons)*1000))
+print(paste0('MSE for N=',N, mean(MSE_cons)*1000))
+print(paste0('Standard deviation of the IMSE for N=',N, sd(IMSE_cons)))
+print(paste0('Standard deviation of the MSE for N=',N, sd(MSE_cons)))
+print(paste0('Times:', tiempo_constrained))
+}
+```
+
+
+```{r}
+print(IMSE_uncons)
+print(MSE_uncons)
+print(IMSE_cons)
+print(MSE_cons)
+```
+
+
+
+```{r, fig.width=5.5, fig.height=4.5}
+#par(mfrow=c(1,2))
+#
+#  plot(T,betaT, col='black', ylim=c(-0.05,0.75), type='l') #true coefficient function
+#  lines(T,results_constrained$mean,col="black",lty=5) #unconstrained estimate
+#  lines(T,results_constrained$lower,col="black",lty=3) #projection based C.I
+#  lines(T,results_constrained$upper,col="black",lty=3)  #projection based C.I
+#  abline(h=0, col='red')
+#  
+#  plot(T,betaT, col='black', ylim=c(-0.05,0.75), type='l') #true coefficient function
+#  lines(T,results_unconstrained$mean,col="black",lty=5) #unconstrained estimate
+#  lines(T,results_unconstrained$lower,col="black",lty=3) #projection based C.I
+#  lines(T,results_unconstrained$upper,col="black",lty=3)  #projection based C.I
+#  abline(h=0, col='red')
+#  
+```
+
+
+
+```{r, fig.width=2.75, fig.height=3.5}
+library(ggplot2)
+library(gridExtra)
+# Create a data fr,ame with the, values for ,T, betaT, and the results
+df <- data.frame(T = T,
+                 betaT = betaT,
+                 mean = results_unconstrained$mean,
+                 lower = results_unconstrained$lower,
+                 upper = results_unconstrained$upper)
+
+df2 <- data.frame(T = T,
+                 betaT = betaT,
+                 mean = results_constrained$mean,
+                 lower = results_constrained$lower,
+                 upper = results_constrained$upper)
+
+
+
+# Create the plot using ggplot
+ggplot(df, aes(x = T)) +
+  geom_line(aes(y = betaT), color = "#666E86", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = mean), color = "#5F3108", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = lower), color = "#B99B81",linetype= "dashed", size=1)+
+  geom_line(aes(y = upper),color = "#B99B81", linetype="dashed", size=1)+
+  geom_hline(yintercept = 0, color = "#780000") +
+  ylim(-0.20, 4.1) +
+  
+  theme_bw() +
+  theme(axis.line = element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = c(.95, .95),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6)
+    ) 
+
+# Create the plot using ggplot
+ggplot(df2, aes(x = T)) +
+  geom_line(aes(y = betaT), color = "#666E86", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = mean), color = "#5F3108", linetype = "solid", 
+            size = 1) +
+  geom_line(aes(y = lower), color = "#B99B81",linetype= "dashed", size=1)+
+  geom_line(aes(y = upper),color = "#B99B81", linetype="dashed", size=1)+
+  geom_hline(yintercept = 0, color = "#780000") +
+  ylim(-0.20, 4.1) +
+  
+  theme_bw() +
+  theme(axis.line = element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = c(.95, .95),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6)
+    ) 
+
+```
+
+
+
+
+

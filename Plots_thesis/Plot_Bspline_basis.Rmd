@@ -1,0 +1,74 @@
+---
+title: "Plot of B-spline basis"
+author: "Diego Serrano Ortega"
+date: "2023-05-08"
+output: html_document
+---
+
+# B-spline basis plots 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(splines)
+x <- seq(0, 1, by=0.001)
+spl <- bs(x, df= 10, degree = 3, Boundary.knots = c(0,1))
+plot(spl[,1]~x, ylim=c(0,max(spl)), type='l', lwd=2, col=1, 
+     xlab="Cubic B-spline basis", ylab="")
+for (j in 2:ncol(spl)) lines(spl[,j]~x, lwd=2, col=j)
+```
+
+
+
+
+```{r}
+require(graphics)
+splineDesign(knots = 1:10, x = 4:7)
+splineDesign(knots = 1:10, x = 4:7, derivs = 1)
+## visualize band structure
+
+
+knots <- c(1,1.8,3:5,6.5,7,8.1,9.2,10)  # 10 => 10-4 = 6 Basis splines
+x <- seq(min(knots)-1, max(knots)+1, length.out = 501)
+bb <- splineDesign(knots, x = x, outer.ok = TRUE)
+
+plot(range(x), c(0,1), type = "n", xlab = "x", ylab = "",
+     main =  "B-splines - sum to 1 inside inner knots", xlim=c(2,7))
+abline(v = knots, lty = 3, col = "light gray")
+abline(v = knots[c(4,length(knots)-3)], lty = 3, col = "gray10")
+#lines(x, rowSums(bb), col = "gray", lwd = 2)
+matlines(x, bb, ylim = c(0,1), lty = 1)
+```
+
+
+
+```{r}
+#install.packages('blapsr')
+library(blapsr)
+lb <- 0  # Lower bound
+ub <- 10 # Upper bound
+xdom <- runif(1000, lb, ub) # bu uniform values between lb and ub
+Bsmat <- cubicbs(xdom, lb, ub, 8) # 100 x 25 B-spline matrix
+plot(Bsmat) # Plot the basis
+```
+
+
+
+
+```{r}
+colors=rep('#22bb44', 8)
+colors[5]='#1234ff'
+
+plot(Bsmat$x[order(Bsmat$x, decreasing=FALSE)],Bsmat$Bmatrix[,1][order(Bsmat$x, decreasing=FALSE)], type= 'l', xlim= c(0, 10),  ylim= c(0, 1), xlab = '', ylab= '', lwd= 2, col='#55bb55', frame=FALSE)
+for (i in 1:8){
+lines(Bsmat$x[order(Bsmat$x, decreasing=FALSE)],Bsmat$Bmatrix[,i][order(Bsmat$x, decreasing=FALSE)], lwd = 2, col=colors[i])
+abline(v=2*i-4, lty= 'dotted', lwd= 0.5)
+}
+abline(v=2, lty= 'dotted', lwd= 0.5)
+```
+
+
+
+
